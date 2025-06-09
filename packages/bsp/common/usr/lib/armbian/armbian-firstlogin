@@ -403,7 +403,6 @@ set_timezone_and_locales() {
 							rm -f /etc/netplan/30-wifis-dhcp.yaml
 							netplan apply --timeout 0 2>/dev/null
 							systemctl daemon-reload
-							break
 						fi
 
 				fi # detected or not detected wireless network
@@ -662,15 +661,56 @@ if [[ -f /root/.not_logged_in_yet && -n $(tty) ]]; then
 	echo -e "\nWaiting for system to finish booting ..."
 	systemctl is-system-running --wait > /dev/null
 
-	# enable hiDPI support
-	if [[ "$(cut -d, -f1 < /sys/class/graphics/fb0/virtual_size 2> /dev/null)" -gt 1920 ]]; then
-		# lightdm
-		[[ -f /etc/lightdm/slick-greeter.conf ]] && echo "enable-hidpi = on" >> /etc/lightdm/slick-greeter.conf
-		# xfce
-		[[ -f /etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml ]] && sed -i 's|<property name="WindowScalingFactor" type="int" value=".*|<property name="WindowScalingFactor" type="int" value="2">|g' /etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
+	# enable networkManager-wait-online.service
+	# When NM is used the NetworkManager-wait-online.service must be enabled so that network-online.target is not reached until
+	# NetworkManager has brought up all the interfaces. Service units that require the network to be up before starting rely
+	# on network-online.target working correctly otherwise they will likely fail on boot
+	# Same goes for systemd-networkd stack
+	# https://github.com/armbian/build/issues/7896
+	if
+		systemctl is-enabled --quiet NetworkManager &&
+		! systemctl is-enabled --quiet NetworkManager-wait-online
+	then
+		systemctl enable NetworkManager-wait-online
+		# @TODO: determine if there is any value in starting it now
+		echo "Waiting for network startup to complete..."
+		systemctl start NetworkManager-wait-online
+	fi
 
-		# framebuffer console larger font
-		setfont /usr/share/consolefonts/Uni3-TerminusBold32x16.psf.gz
+	if
+		systemctl is-enabled --quiet systemd-networkd &&
+		! systemctl is-enabled --quiet systemd-networkd-wait-online
+	then
+		systemctl enable systemd-networkd-wait-online
+		# @TODO: determine if there is any value in starting it now
+		echo "Waiting for network startup to complete..."
+		systemctl start systemd-networkd-wait-online
+	fi
+
+	# Enable HiDPI support only if the framebuffer size is detectable
+	FB_VIRTUAL_SIZE="/sys/class/graphics/fb0/virtual_size"
+	HIDPI_THRESHOLD="1920"
+	if [[ -r "$FB_VIRTUAL_SIZE" ]]; then
+		fb_virtual_width=$(cut -d, -f1 < "$FB_VIRTUAL_SIZE" 2>/dev/null)
+		if [[ "$fb_virtual_width" =~ ^[0-9]+$ && "$fb_virtual_width" -gt "${HIDPI_THRESHOLD}" ]]; then
+			# Enable HiDPI in LightDM slick-greeter
+			if [[ -f /etc/lightdm/slick-greeter.conf ]]; then
+				if ! grep -q "^enable-hidpi *= *on" /etc/lightdm/slick-greeter.conf; then
+					echo "enable-hidpi = on" >> /etc/lightdm/slick-greeter.conf
+				fi
+			fi
+
+			# Set XFCE scaling factor in skeleton config
+			XFCE_XSETTINGS="/etc/skel/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
+			if [[ -f "$XFCE_XSETTINGS" ]]; then
+				sed -i 's|\(<property name="WindowScalingFactor" type="int" value="\)[^"]*\(">\)|\12\2|' "$XFCE_XSETTINGS"
+			fi
+
+			# Set a larger console font for framebuffer
+			if [[ -f /usr/share/consolefonts/Uni3-TerminusBold32x16.psf.gz ]]; then
+				setfont /usr/share/consolefonts/Uni3-TerminusBold32x16.psf.gz
+			fi
+		fi
 	fi
 
 	clear
